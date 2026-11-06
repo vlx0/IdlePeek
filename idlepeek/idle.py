@@ -51,7 +51,7 @@ user32.GetLastInputInfo.restype = wt.BOOL
 
 @dataclass
 class Snap:
-    idle_sec: int = 0
+    idle_sec: int | None = None
     scheme: str = ""
     on_ac: bool = True
     sleep_sec: int | None = None
@@ -82,7 +82,7 @@ def format_after(seconds: int | None) -> str:
     return f"через {format_span(seconds)}"
 
 
-def leftover(idle_sec: int, timeout_sec: int | None) -> str:
+def leftover(idle_sec: int, timeout_sec: int | None, gone: str = "уже должен был") -> str:
     if timeout_sec is None:
         return "не прочитан"
     if timeout_sec == 0:
@@ -90,7 +90,7 @@ def leftover(idle_sec: int, timeout_sec: int | None) -> str:
     left = timeout_sec - idle_sec
     if left > 0:
         return f"ещё {format_span(left)}"
-    return "уже должен был"
+    return gone
 
 
 def overdue(idle_sec: int, timeout_sec: int | None) -> bool:
@@ -107,6 +107,9 @@ def sample() -> Snap:
     try:
         snap.scheme, snap.on_ac, snap.sleep_sec, snap.display_sec, snap.hibernate_sec, snap.away = _scheme()
     except OSError:
+        snap.error = "схема питания не прочиталась."
+        return snap
+    if snap.sleep_sec is None and snap.display_sec is None:
         snap.error = "схема питания не прочиталась."
     return snap
 
@@ -175,6 +178,8 @@ def _index(scheme: GUID | None, subgroup: str, setting: str, ac: bool) -> int | 
 
 def _scheme() -> tuple[str, bool, int | None, int | None, int | None, int | None]:
     name, scheme = _active_scheme()
+    if scheme is None:
+        raise OSError("PowerGetActiveScheme")
     ac = _on_ac()
     return (
         name,

@@ -61,3 +61,12 @@ class HeadlineTests(unittest.TestCase):
         text, color = _headline(Snap(idle_sec=12, sleep_sec=0, display_sec=0, scheme="Высокая производительность"))
         self.assertIn("выключены", text)
         self.assertEqual(color, "#fde68a")
+
+    def test_sleep_when_display_never(self) -> None:
+        text, _color = _headline(Snap(idle_sec=12, sleep_sec=600, display_sec=0, scheme="Экономия энергии"))
+        self.assertIn("Сон ещё 9 мин 48 с", text)
+
+    def test_idle_unread(self) -> None:
+        text, color = _headline(Snap(error="время простоя не прочиталось."))
+        self.assertEqual(text, "время простоя не прочиталось.")
+        self.assertEqual(color, "#fca5a5")

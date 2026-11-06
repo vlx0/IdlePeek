@@ -24,7 +24,9 @@ BAD = "#fca5a5"
 
 
 def _headline(snap: Snap) -> tuple[str, str]:
-    if snap.error and snap.sleep_sec is None and not snap.scheme:
+    if snap.idle_sec is None:
+        return snap.error or "время простоя не прочиталось.", BAD
+    if snap.error and snap.sleep_sec is None and snap.display_sec is None:
         return snap.error, BAD
     idle = format_span(snap.idle_sec)
     if overdue(snap.idle_sec, snap.sleep_sec):
@@ -33,9 +35,10 @@ def _headline(snap: Snap) -> tuple[str, str]:
         return f"Простой {idle}. Экран уже должен был погаснуть.", HOT
     if snap.sleep_sec == 0 and snap.display_sec == 0:
         return f"Простой {idle}. Сон и экран в схеме выключены.", HOT
-    left = leftover(snap.idle_sec, snap.display_sec)
     if snap.display_sec and snap.display_sec > 0:
-        return f"Простой {idle}. Экран {left}.", OK
+        return f"Простой {idle}. Экран {leftover(snap.idle_sec, snap.display_sec)}.", OK
+    if snap.sleep_sec and snap.sleep_sec > 0:
+        return f"Простой {idle}. Сон {leftover(snap.idle_sec, snap.sleep_sec)}.", OK
     return f"Простой {idle}.", OK
 
 
@@ -49,7 +52,8 @@ class IdlePeekApp(tk.Tk):
         self._sec = load_interval()
         self._job: str | None = None
         self._busy = False
-        self._sig: tuple | None = None
+        self._layout: tuple | None = None
+        self._boxes: dict[str, tuple[tk.Frame, tk.Label]] = {}
 
         style = ttk.Style(self)
         try:
@@ -83,6 +87,7 @@ class IdlePeekApp(tk.Tk):
         )
         self._iv.pack(side="right", padx=(0, 10))
         self._iv.bind("<<ComboboxSelected>>", lambda _e: self._on_interval())
+        self._iv.bind("<MouseWheel>", lambda _e: "break")
         tk.Label(foot, text="обновление", bg=BG, fg=MUTED, font=("Segoe UI", 8)).pack(side="right", padx=(0, 6))
 
         head = tk.Frame(pad, bg=BG)
@@ -111,15 +116,16 @@ class IdlePeekApp(tk.Tk):
     def _on_canvas(self, event: tk.Event) -> None:
         self._canvas.itemconfigure(self._win, width=event.width)
 
-    def _wheel(self, event: tk.Event) -> None:
+    def _wheel(self, event: tk.Event) -> str | None:
         widget = event.widget
         if isinstance(widget, str):
-            return
+            return "break"
         while widget is not None:
             if widget in (self._canvas, self._list):
                 self._canvas.yview_scroll(int(-event.delta / 120), "units")
-                return
+                return None
             widget = getattr(widget, "master", None)
+        return "break"
 
     def _on_interval(self) -> None:
         lab = self._iv_var.get()
@@ -191,32 +197,55 @@ class IdlePeekApp(tk.Tk):
             return
         text, color = _headline(snap)
         self._status.configure(text=text, fg=color)
+        if snap.idle_sec is None:
+            layout = ("error", snap.error)
+            if layout != self._layout or self._boxes:
+                self._layout = layout
+                self._render((), snap.error or "время простоя не прочиталось.")
+            self._schedule()
+            return
         source = "от сети" if snap.on_ac else "от батареи"
         scheme = snap.scheme or "без имени"
-        away = "включён" if snap.away else "выключен" if snap.away == 0 else "не прочитан"
+        if snap.away is None:
+            away = "не прочитан"
+        elif snap.away:
+            away = "разрешён в схеме"
+        else:
+            away = "запрещён в схеме"
+        idle = snap.idle_sec
         rows = (
-            ("Простой", format_span(snap.idle_sec), _idle_border(snap)),
+            ("Простой", format_span(idle), _idle_border(snap)),
             (f"Схема «{scheme}»", f"питание {source}", MUTED),
-            ("Экран", leftover(snap.idle_sec, snap.display_sec), _row_border(snap.idle_sec, snap.display_sec)),
-            ("Сон", leftover(snap.idle_sec, snap.sleep_sec), _row_border(snap.idle_sec, snap.sleep_sec, sleep=True)),
-            ("Гибернация", leftover(snap.idle_sec, snap.hibernate_sec), _row_border(snap.idle_sec, snap.hibernate_sec)),
+            ("Экран", leftover(idle, snap.display_sec, "уже должен был погаснуть"), _row_border(idle, snap.display_sec)),
+            ("Сон", leftover(idle, snap.sleep_sec, "уже должен был наступить"), _row_border(idle, snap.sleep_sec, sleep=True)),
+            ("Гибернация", leftover(idle, snap.hibernate_sec, "уже должна была"), _row_border(idle, snap.hibernate_sec)),
             ("Режим отсутствия", away, MUTED),
         )
-        if rows != self._sig:
-            self._sig = rows
+        layout = (scheme, source, snap.error)
+        if layout != self._layout or not self._boxes:
+            self._layout = layout
             self._render(rows, snap.error)
+        else:
+            self._paint(rows)
         self._schedule()
 
     def _render(self, rows: tuple, error: str) -> None:
         for child in self._list.winfo_children():
             child.destroy()
-        if error and all(row[0] != "Простой" for row in rows):
-            self._muted(error)
-            return
+        self._boxes = {}
         for title, body, color in rows:
             self._card(title, body, color)
         if error:
             self._muted(error)
+
+    def _paint(self, rows: tuple) -> None:
+        for title, body, color in rows:
+            pair = self._boxes.get(title)
+            if pair is None:
+                continue
+            box, lab = pair
+            lab.configure(text=body, fg=color)
+            box.configure(highlightbackground=color, highlightcolor=color)
 
     def _muted(self, text: str) -> None:
         tk.Label(
@@ -233,20 +262,21 @@ class IdlePeekApp(tk.Tk):
         inner = tk.Frame(box, bg=CARD)
         inner.pack(fill="x", padx=12, pady=10)
         tk.Label(inner, text=title, bg=CARD, fg=FG, font=("Segoe UI Semibold", 11), anchor="w").pack(fill="x")
-        tk.Label(inner, text=body, bg=CARD, fg=color, font=("Segoe UI", 10), wraplength=440, justify="left", anchor="w").pack(fill="x", pady=(2, 0))
+        lab = tk.Label(inner, text=body, bg=CARD, fg=color, font=("Segoe UI", 10), wraplength=440, justify="left", anchor="w")
+        lab.pack(fill="x", pady=(2, 0))
+        self._boxes[title] = (box, lab)
 
 
 def _idle_border(snap: Snap) -> str:
-    if overdue(snap.idle_sec, snap.sleep_sec):
+    idle = snap.idle_sec or 0
+    if overdue(idle, snap.sleep_sec):
         return BAD
-    if overdue(snap.idle_sec, snap.display_sec):
+    if overdue(idle, snap.display_sec):
         return HOT
     return OK
 
 
 def _row_border(idle_sec: int, timeout_sec: int | None, sleep: bool = False) -> str:
-    if timeout_sec == 0:
-        return HOT
     if overdue(idle_sec, timeout_sec):
         return BAD if sleep else HOT
     return MUTED
